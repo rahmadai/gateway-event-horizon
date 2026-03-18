@@ -1,0 +1,230 @@
+services:
+  # ----------------------
+  # Infrastructure
+  # ----------------------
+  redis:
+    image: redis:7-alpine
+    container_name: gev-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - gev-network
+
+  mysql-job-matching:
+    image: mysql:8.0
+    container_name: gev-mysql-job-matching
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: job_matching
+      MYSQL_USER: job_matching_user
+      MYSQL_PASSWORD: secure_password
+    ports:
+      - "3308:3306"
+    volumes:
+      - mysql_job_matching_data:/var/lib/mysql
+      - ./migrations/job-matching:/docker-entrypoint-initdb.d:ro
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --innodb-buffer-pool-size=1G
+      --max-connections=200
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - gev-network
+
+  mysql-payment:
+    image: mysql:8.0
+    container_name: gev-mysql-payment
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: payment
+      MYSQL_USER: payment_user
+      MYSQL_PASSWORD: secure_password
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_payment_data:/var/lib/mysql
+      - ./migrations/payment:/docker-entrypoint-initdb.d:ro
+    command: >
+      --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - gev-network
+
+  rabbitmq:
+    image: rabbitmq:3-alpine
+    container_name: gev-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin
+    ports:
+      - "5672:5672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - gev-network
+
+  # ----------------------
+  # Application Services
+  # ----------------------
+  gateway:
+    build:
+      context: ./services/gateway
+      dockerfile: Dockerfile
+    container_name: gev-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - JOB_MATCHING_URL=http://job-matching:8001
+      - NOTIFICATION_URL=http://notification:8002
+      - PAYMENT_URL=http://payment:8003
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - gev-network
+    restart: unless-stopped
+
+  job-matching:
+    build:
+      context: ./services/job-matching
+      dockerfile: Dockerfile
+    container_name: gev-job-matching
+    ports:
+      - "8001:8001"
+    environment:
+      - DB_HOST=mysql-job-matching
+      - DB_PORT=3306
+      - DB_USER=job_matching_user
+      - DB_PASSWORD=secure_password
+      - DB_NAME=job_matching
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      mysql-job-matching:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - gev-network
+    restart: unless-stopped
+
+  notification:
+    build:
+      context: ./services/notification
+      dockerfile: Dockerfile
+    container_name: gev-notification
+    ports:
+      - "8002:8002"
+    environment:
+      - CELERY_BROKER_URL=amqp://admin:admin@rabbitmq:5672/
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - gev-network
+    restart: unless-stopped
+
+  payment:
+    build:
+      context: ./services/payment
+      dockerfile: Dockerfile
+    container_name: gev-payment
+    ports:
+      - "8003:8003"
+    environment:
+      - DB_HOST=mysql-payment
+      - DB_PORT=3306
+      - DB_USER=payment_user
+      - DB_PASSWORD=secure_password
+      - DB_NAME=payment
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-sk_test_dummy}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-whsec_dummy}
+    depends_on:
+      mysql-payment:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - gev-network
+    restart: unless-stopped
+
+  # Celery worker for notification service
+  celery-worker:
+    build:
+      context: ./services/notification
+      dockerfile: Dockerfile
+    container_name: gev-celery-worker
+    command: celery -A src.tasks worker --loglevel=info
+    environment:
+      - CELERY_BROKER_URL=amqp://admin:admin@rabbitmq:5672/
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      notification:
+        condition: service_started
+    networks:
+      - gev-network
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  mysql_job_matching_data:
+  mysql_payment_data:
+  rabbitmq_data:
+
+networks:
+  gev-network:
+    driver: bridge

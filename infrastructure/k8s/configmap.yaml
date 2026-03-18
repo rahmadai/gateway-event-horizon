@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: gateway-event-horizon
+data:
+  # Database
+  DB_HOST: "mysql-job-matching"
+  DB_PORT: "3306"
+  DB_NAME: "job_matching"
+  
+  # Redis
+  REDIS_URL: "redis://redis:6379"
+  
+  # RabbitMQ
+  CELERY_BROKER_URL: "amqp://admin:admin@rabbitmq:5672/"
+  CELERY_RESULT_BACKEND: "redis://redis:6379/0"
+  
+  # Service URLs
+  JOB_MATCHING_URL: "http://job-matching:8001"
+  NOTIFICATION_URL: "http://notification:8002"
+  PAYMENT_URL: "http://payment:8003"
