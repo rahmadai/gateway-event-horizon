@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway-event-horizon
+  labels:
+    name: gateway-event-horizon
+    environment: production
